@@ -32,7 +32,7 @@ def run():
     model = DCGAN3D_model(generator=generator, discriminator=discriminator, latent_dim=LATENT_DIM)
     
     monitor = DCGAN3D_monitor("data/DCGAN3D_data/images/", latent_dim=LATENT_DIM)
-    #weights_track = keras.callbacks.ModelCheckpoint("data/DCGAN3D_data/checkpoints/cp.ckpt", save_weights_only=True, save_best_only=False)
+    weights_track = keras.callbacks.ModelCheckpoint("data/DCGAN3D_data/checkpoints/DCGAN3D_training-{epoch:04d}.ckpt", save_weights_only=True, save_best_only=False)
     tensorboard_callback = keras.callbacks.TensorBoard(log_dir="data/DCGAN3D_data/logs/", histogram_freq=1)    
 
     model.compile(
