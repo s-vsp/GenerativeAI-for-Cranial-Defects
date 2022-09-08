@@ -4,6 +4,7 @@ import pathlib
 import numpy as np
 import SimpleITK as sitk
 from matplotlib import pyplot as plt
+from sklearn.manifold import TSNE
 import io
 import scipy.ndimage
 import tensorflow as tf
@@ -211,3 +212,10 @@ def create_dataset(dataset_type: int=0, output_shape: tuple=(128,128,128,2), bat
 
     return dataset.shuffle(570)
     
+def latent_space_visualization(data):
+    """t-SNE projection of latent space"""
+    tsne = TSNE(n_components=2, init="pca", random_state=42)
+    tsne.fit_transform(data)
+
+def latent_space_interpolation(image_1, image_2):
+    pass

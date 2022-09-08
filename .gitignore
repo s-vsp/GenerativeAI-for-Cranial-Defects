@@ -1,1 +1,5 @@
 data/autoimplant/
+images/
+latent_manifold/
+checkpoints/
+logs/

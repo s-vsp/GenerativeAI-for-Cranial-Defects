@@ -143,7 +143,6 @@ def make_WGANGP3D_generator(latent_dim: int=200, hidden_dim: int=512, output_sha
 
 
 def critic_loss(real_data, fake_data):
-    # Minus before the return expression to perform maximizing instead of minimizing
     return tf.reduce_mean(fake_data) - tf.reduce_mean(real_data)
 
 

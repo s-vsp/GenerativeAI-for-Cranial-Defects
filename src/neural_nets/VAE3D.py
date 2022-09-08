@@ -3,7 +3,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, losses, optimizers, models, metrics
 import tensorflow_addons as tfa
-
+import pickle
 
 class Sampler(layers.Layer):
     """
@@ -12,7 +12,7 @@ class Sampler(layers.Layer):
     def call(self, inputs):
         Z_mean, Z_var = inputs
         batch_size = tf.shape(Z_mean)[0]
-        latent_dim = tf.shape( Z_mean)[1]
+        latent_dim = tf.shape(Z_mean)[1]
         
         # Use reparametrization trick
         epsilon = tf.random.normal(shape=(batch_size, latent_dim))
@@ -27,7 +27,7 @@ def make_encoder(input_shape: int=128, latent_dim : int=200):
     block_1 = models.Sequential(
         [
             layers.Conv3D(64, (4,4,4), (2,2,2), padding="same"),
-            tfa.layers.GroupNormalization(groups=16),
+            tfa.layers.GroupNormalization(groups=64),
             layers.LeakyReLU(alpha=0.2)
         ], name="Conv3D_block_1"
     )(inputs)
@@ -36,7 +36,7 @@ def make_encoder(input_shape: int=128, latent_dim : int=200):
     block_2 = models.Sequential(
         [
             layers.Conv3D(128, (4,4,4), (2,2,2), padding="same"),
-            tfa.layers.GroupNormalization(groups=16),
+            tfa.layers.GroupNormalization(groups=128),
             layers.LeakyReLU(alpha=0.2)
         ], name="Conv3D_block_2"
     )(block_1)
@@ -45,7 +45,7 @@ def make_encoder(input_shape: int=128, latent_dim : int=200):
     block_3 = models.Sequential(
         [
             layers.Conv3D(256, (4,4,4), (2,2,2), padding="same"),
-            tfa.layers.GroupNormalization(groups=16),
+            tfa.layers.GroupNormalization(groups=256),
             layers.LeakyReLU(alpha=0.2)
         ], name="Conv3D_block_3"
     )(block_2)
@@ -54,29 +54,28 @@ def make_encoder(input_shape: int=128, latent_dim : int=200):
     block_4 = models.Sequential(
         [
             layers.Conv3D(512, (4,4,4), (2,2,2), padding="same"),
-            tfa.layers.GroupNormalization(groups=16),
+            tfa.layers.GroupNormalization(groups=512),
             layers.LeakyReLU(alpha=0.2)
         ], name="Conv3D_block_4"
     )(block_3)
+
+    # Adaptive Average Pooling layer
+    adp_avg_pool_1 = models.Sequential(
+    [
+        tfa.layers.AdaptiveAveragePooling3D((1,1,1))
+    ]
+    )(block_4)
 
     # Flatten layer
     flatten = models.Sequential(
         [
             layers.Flatten()
         ], name="Flatten"
-    )(block_4)
+    )(adp_avg_pool_1)
 
-    # Dense layer
-    dense_1 = models.Sequential(
-        [
-            layers.Dense(4096),
-            layers.LeakyReLU(alpha=0.2),
-        ], name="Dense_1"
-    )(flatten)
-
-    # Compute mean and standard deviation and sample Z
-    Z_mean = layers.Dense(latent_dim, name="Z_mean")(dense_1)
-    Z_var = layers.Dense(latent_dim, name="Z_var")(dense_1)
+    # Compute mean and variance and sample Z
+    Z_mean = layers.Dense(latent_dim, name="Z_mean")(flatten)
+    Z_var = layers.Dense(latent_dim, name="Z_var")(flatten)
     Z = Sampler()([Z_mean, Z_var])
 
     encoder = models.Model(inputs=inputs, outputs=[Z_mean, Z_var, Z], name="Encoder")
@@ -103,7 +102,7 @@ def make_decoder(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128
     block_1 = models.Sequential(
         [
             layers.Conv3DTranspose(512, (4,4,4), (1,1,1), padding="same"),
-            layers.BatchNormalization(),
+            tfa.layers.GroupNormalization(groups=512),
             layers.ReLU()
         ], name="DeConv3D_block_1"
     )(reshape_layer)
@@ -112,7 +111,7 @@ def make_decoder(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128
     block_2 = models.Sequential(
         [
             layers.Conv3DTranspose(256, (4,4,4), (2,2,2), padding="same"),
-            layers.BatchNormalization(),
+            tfa.layers.GroupNormalization(groups=256),
             layers.ReLU()
         ], name="DeConv3D_block_2"
     )(block_1)
@@ -121,7 +120,7 @@ def make_decoder(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128
     block_3 = models.Sequential(
         [
             layers.Conv3DTranspose(128, (4,4,4), (2,2,2), padding="same"),
-            layers.BatchNormalization(),
+            tfa.layers.GroupNormalization(groups=128),
             layers.ReLU()
         ], name="DeConv3D_block_3"
     )(block_2)
@@ -130,7 +129,7 @@ def make_decoder(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128
     block_4 = models.Sequential(
         [
             layers.Conv3DTranspose(64, (4,4,4), (2,2,2), padding="same"),
-            layers.BatchNormalization(),
+            tfa.layers.GroupNormalization(groups=64),
             layers.ReLU()
         ], name="DeConv3D_block_4"
     )(block_3)
@@ -138,7 +137,7 @@ def make_decoder(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128
     # Output layer
     outputs = models.Sequential(
         [
-            layers.Conv3DTranspose(2, (4,4,4), (2,2,2), padding="same", activation="tanh")
+            layers.Conv3DTranspose(2, (4,4,4), (2,2,2), padding="same", activation="sigmoid")
         ], name="Output_layer"
     )(block_4)
 
@@ -184,6 +183,7 @@ class VAE3D_model(models.Model):
         self.reconstruction_loss_metric.update_state(reconstruction_loss)
         self.kl_loss_metric.update_state(kl_loss)
         self.total_loss_metric.update_state(total_loss)
+        
         return {
             "total_loss": self.total_loss_metric.result(), 
             "reconstruction_loss": self.reconstruction_loss_metric.result(),
@@ -221,3 +221,19 @@ class VAE3D_monitor(keras.callbacks.Callback):
 
         image_channels = keras.preprocessing.image.array_to_img(result_stacked)
         image_channels.save(self.save_path + "input_skull_and_reconstruction_on_{epoch}.png".format(epoch=epoch))
+
+
+class LatentManifoldSaver(keras.callbacks.Callback):
+    """
+    Saves first and second moments of the latent manifold and the manifold itself
+    """
+    def __init__(self, save_path, data):
+        self.save_path = save_path
+        self.data = data
+    
+    def on_epoch_end(self, epoch, logs=None):
+        Z_mean, Z_var, Z = self.model.encoder(self.data)
+        
+        pickle.dump(Z_mean, open(self.save_path + "Z_mean_on_epoch_{epoch}.pkl".format(epoch=epoch), "wb"))
+        pickle.dump(Z_var, open(self.save_path + "Z_var_on_epoch_{epoch}.pkl".format(epoch=epoch), "wb"))
+        pickle.dump(Z, open(self.save_path + "Z_on_epoch_{epoch}.pkl".format(epoch=epoch), "wb"))

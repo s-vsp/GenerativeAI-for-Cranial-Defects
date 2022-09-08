@@ -49,5 +49,4 @@ def run():
     model.fit(dataset, epochs=NUM_EPOCHS, callbacks=[monitor, weights_track, tensorboard_callback])
 
 if __name__ == "__main__":
-    print("WORKING HERE!!!")
     run()
