@@ -213,8 +213,7 @@ class WGANGP3D_model(models.Model):
         # Monitor loss
         self.critic_loss_metric.update_state(c_loss)
         self.generator_loss_metric.update_state(g_loss)
-        #return {"critic_loss": self.critic_loss_metric.result(), "generator_loss": self.generator_loss_metric.result()}
-        return {"critic_loss": c_loss, "generator_loss": g_loss}
+        return {"critic_loss": self.critic_loss_metric.result(), "generator_loss": self.generator_loss_metric.result()}
         
 
 def threshold(image: np.array):
@@ -243,7 +242,7 @@ class WGANGP3D_monitor(keras.callbacks.Callback):
         result_stacked = np.stack([result,result,result], axis=-1)
 
         image_channels = keras.preprocessing.image.array_to_img(result_stacked)
-        image_channels.save(self.save_path + "generated_skull_on_epoch_{epoch}_8th_run.png".format(epoch=epoch))
+        image_channels.save(self.save_path + "generated_skull_on_epoch_{epoch}.png".format(epoch=epoch))
 
         # Binary + Implant fitted
         thresholded_skull = threshold(skull)
@@ -267,4 +266,10 @@ class WGANGP3D_monitor(keras.callbacks.Callback):
         result_thresholded_stacked = np.stack([result_thresholded, result_thresholded, result_thresholded], -1)
 
         thresholded_channels = keras.preprocessing.image.array_to_img(result_thresholded_stacked)
-        thresholded_channels.save(self.save_path + "generated_skull_thresholded_on_epoch_{epoch}_8th_run.png".format(epoch=epoch))
+        thresholded_channels.save(self.save_path + "generated_skull_thresholded_on_epoch_{epoch}.png".format(epoch=epoch))
+
+if __name__ == "__main__":
+    g = make_WGANGP3D_generator()
+    c = make_WGANGP3D_critic()
+    keras.utils.plot_model(g, "WGAN_gen.png", show_shapes=True)
+    keras.utils.plot_model(c, "WGAN_cri.png", show_shapes=True)

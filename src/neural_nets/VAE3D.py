@@ -5,6 +5,7 @@ from tensorflow.keras import layers, losses, optimizers, models, metrics
 import tensorflow_addons as tfa
 import pickle
 
+
 class Sampler(layers.Layer):
     """
     Input is of shape -> (None, latent_dim), where None represents the future batch size
@@ -63,7 +64,7 @@ def make_encoder(input_shape: int=128, latent_dim : int=200):
     adp_avg_pool_1 = models.Sequential(
     [
         tfa.layers.AdaptiveAveragePooling3D((1,1,1))
-    ]
+    ], name="Adaptive_Average_Pooling_1"
     )(block_4)
 
     # Flatten layer
@@ -73,13 +74,14 @@ def make_encoder(input_shape: int=128, latent_dim : int=200):
         ], name="Flatten"
     )(adp_avg_pool_1)
 
-    # Compute mean and variance and sample Z
+    # Compute mean and standard deviation and sample Z
     Z_mean = layers.Dense(latent_dim, name="Z_mean")(flatten)
     Z_var = layers.Dense(latent_dim, name="Z_var")(flatten)
     Z = Sampler()([Z_mean, Z_var])
 
     encoder = models.Model(inputs=inputs, outputs=[Z_mean, Z_var, Z], name="Encoder")
     return encoder
+
 
 def make_decoder(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128):
     inputs = layers.Input(shape=(latent_dim,))
@@ -145,11 +147,14 @@ def make_decoder(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128
 
     return decoder
 
-def reconstruction_loss(data, reconstruction):
-    return tf.reduce_mean(tf.reduce_mean(tf.reduce_sum(losses.binary_crossentropy(data, reconstruction), axis=(1,2,3))))
 
-def kl_loss(Z_mean, Z_var):
-    return tf.reduce_sum(-0.5 * (Z_var - tf.square(Z_mean) + 1 - tf.exp(Z_var)), axis=-1)
+def reconstruction_loss(data, reconstruction):
+    return tf.reduce_mean(tf.reduce_mean(tf.reduce_sum(losses.binary_crossentropy(data, reconstruction))))
+
+
+def kl_loss(Z_mean, Z_log_var):
+    return tf.reduce_sum(-0.5 * (Z_log_var - tf.square(Z_mean) + 1 - tf.exp(Z_log_var)), axis=-1)
+
 
 class VAE3D_model(models.Model):
     def __init__(self, encoder, decoder, latent_dim):
@@ -180,15 +185,23 @@ class VAE3D_model(models.Model):
             total_loss = reconstruction_loss + kl_loss
         grads = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        
         self.reconstruction_loss_metric.update_state(reconstruction_loss)
         self.kl_loss_metric.update_state(kl_loss)
         self.total_loss_metric.update_state(total_loss)
-        
         return {
             "total_loss": self.total_loss_metric.result(), 
             "reconstruction_loss": self.reconstruction_loss_metric.result(),
             "kl_loss": self.kl_loss_metric.result()
         }
+
+
+def threshold(image: np.array):
+    thresholded = np.copy(image)
+    thresholded[image < 0.5] = 0
+    thresholded[image >= 0.5] = 1
+    return thresholded
+
 
 class VAE3D_monitor(keras.callbacks.Callback):
     def __init__(self, save_path, data):
@@ -197,7 +210,8 @@ class VAE3D_monitor(keras.callbacks.Callback):
     
     def on_epoch_end(self, epoch, logs=None):
         _, _, Z = self.model.encoder(self.data)
-        reconstruction = self.model.decoder(Z)
+        #reconstruction = self.model.decoder(Z)
+        skull = self.model.decoder.predict(Z)
         
         # Show input data (skull)
         input_skull = self.data.numpy()
@@ -207,7 +221,7 @@ class VAE3D_monitor(keras.callbacks.Callback):
         input_skull_result = np.vstack([input_skull_proj_1, input_skull_proj_2, input_skull_proj_3])
 
         # Show reconstructed raw channels 
-        skull = reconstruction.numpy()
+        #skull = reconstruction.numpy()
         result1 = np.hstack([skull[0,:,:,40,0], skull[0,:,:,40,1]])
         result2 = np.hstack([np.rot90(skull[0,:,40,:,0]), np.rot90(skull[0,:,40,:,1])])
         result3 = np.hstack([np.rot90(skull[0,40,:,:,0]), np.rot90(skull[0,40,:,:,1])])
@@ -237,3 +251,10 @@ class LatentManifoldSaver(keras.callbacks.Callback):
         pickle.dump(Z_mean, open(self.save_path + "Z_mean_on_epoch_{epoch}.pkl".format(epoch=epoch), "wb"))
         pickle.dump(Z_var, open(self.save_path + "Z_var_on_epoch_{epoch}.pkl".format(epoch=epoch), "wb"))
         pickle.dump(Z, open(self.save_path + "Z_on_epoch_{epoch}.pkl".format(epoch=epoch), "wb"))
+
+
+if __name__ == "__main__":
+    enc = make_encoder()
+    dec = make_decoder()
+    keras.utils.plot_model(enc, "vae_enc.png", show_shapes=True)
+    keras.utils.plot_model(dec, "vae_dec.png", show_shapes=True)

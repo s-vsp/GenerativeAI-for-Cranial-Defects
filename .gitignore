@@ -1,5 +1,14 @@
 data/autoimplant/
+data/autoimplant_test/
+data/VNet_data
 images/
 latent_manifold/
 checkpoints/
 logs/
+interpolations/
+generated_skulls/
+latent/
+__pycache__/
+
+tsne.svg
+umap.svg

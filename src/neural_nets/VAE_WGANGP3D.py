@@ -251,6 +251,7 @@ class VAE_WGANGP3D_monitor(keras.callbacks.Callback):
         result2 = np.hstack([np.rot90(skull[0,:,40,:,0]), np.rot90(skull[0,:,40,:,1])])
         result3 = np.hstack([np.rot90(skull[0,40,:,:,0]), np.rot90(skull[0,40,:,:,1])])
         result = np.vstack([result1, result2, result3])
+        
         # For RGB-like purposes of keras arr-to-img visualization
         result_stacked = np.stack([result,result,result], axis=-1)
 
@@ -280,3 +281,10 @@ class VAE_WGANGP3D_monitor(keras.callbacks.Callback):
 
         thresholded_channels = keras.preprocessing.image.array_to_img(result_thresholded_stacked)
         thresholded_channels.save(self.save_path + "generated_skull_thresholded_on_epoch_{epoch}.png".format(epoch=epoch))
+
+
+if __name__ == "__main__":
+    A = make_VAE_WGANGP3D_generator()
+    B = make_VAE_WGANGP3D_critic()
+    keras.utils.plot_model(A, "VAEWGANgeenratero.png", show_shapes=True)
+    keras.utils.plot_model(B, "VAEWGANcritic.png", show_shapes=True)

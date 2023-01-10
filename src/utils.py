@@ -39,6 +39,17 @@ def load_nrrd(path: pathlib.Path) -> tuple:
 
 
 def save_to_nrrd(save_path: pathlib.Path, volume: np.ndarray, spacing: tuple, origin: tuple=None, direction: tuple=None):
+    """
+    Function saving data into .nrrd format.
+    Swaps the axes to have the data in the original format: change from (Y, X, Z) to (Z, Y, X)
+
+    Args:
+        - save_path: path to which write the file
+        - volume: (y_slice, x_slice, z_slice) representing the skull
+        - spacing: spacing between volumes
+        - origin: image origin
+        - direction: image direction
+    """
     image = sitk.GetImageFromArray(volume.swapaxes(2, 1).swapaxes(1, 0).astype(np.uint8))
     image.SetSpacing(spacing)
     if origin is not None:
@@ -50,7 +61,19 @@ def save_to_nrrd(save_path: pathlib.Path, volume: np.ndarray, spacing: tuple, or
     sitk.WriteImage(image, save_path)
 
 
-def downsample(image: np.ndarray, downsampling_factor: int=4):
+def downsample(image: np.ndarray, downsampling_factor: int=4) -> np.ndarray:
+    """
+    Downsamples the 3D image into the lower resoluition by a given downsampling factor.
+    If the input image resolution is 512 x 512 x 512 and the downsampling factor is 4, then the downsampled image
+    resolution is ( 512 x 512 x 512 ) / 4 ---> 128 x 128 x 128
+
+    Args:
+        - image: input image having a higher resolution
+        - downsampling_factor: integer by which the original image dimension is divided
+
+    Returns:
+        - downsampled_image: output image with the lower resolution
+    """
     xx, yy, zz = np.meshgrid(
         np.arange(image.shape[0] // downsampling_factor), 
         np.arange(image.shape[1] // downsampling_factor),
@@ -173,7 +196,18 @@ def map_concatenate_1(filename, output_shape):
     return out
 
 
-def create_dataset(dataset_type: int=0, output_shape: tuple=(128,128,128,2), batch_size: int=16):
+def mixed_data_mapping(filename, output_shape):
+    def read_nrrd_and_preprocess(filename):
+        volume, _, _, _ = load_nrrd(filename.numpy().decode("utf8"))
+        output = tf.cast(volume, tf.float32)
+        return output
+
+    out = tf.py_function(read_nrrd_and_preprocess, [filename], tf.float32)
+    out.set_shape(output_shape)
+    return out
+
+
+def create_dataset(dataset_type: int=0, output_shape: tuple=(128,128,128,2)) -> tf.data.Dataset:
     """
     Function that generates tf.data.Dataset based on given conditions
 
@@ -182,6 +216,9 @@ def create_dataset(dataset_type: int=0, output_shape: tuple=(128,128,128,2), bat
             0 - Dataset where ich data record is a pair of defected skull and implant for it.
                 They are represented as tf.Tensors of the given shape (e.g. 512 x 512 x 512) and 2 channels
                 resulting in the tensor of shape 512 x 512 x 512 x 2
+    
+    Returns:
+        - dataset: shuffled dataset
     """
     # Load data
     complete_skulls = tf.data.Dataset.list_files("./data/autoimplant/nrrd/complete_skull/*.nrrd", shuffle=False)
@@ -211,11 +248,85 @@ def create_dataset(dataset_type: int=0, output_shape: tuple=(128,128,128,2), bat
         dataset = implants.map(lambda filename: map_concatenate_1(filename, output_shape), num_parallel_calls=tf.data.AUTOTUNE)
 
     return dataset.shuffle(570)
-    
-def latent_space_visualization(data):
-    """t-SNE projection of latent space"""
-    tsne = TSNE(n_components=2, init="pca", random_state=42)
-    tsne.fit_transform(data)
 
-def latent_space_interpolation(image_1, image_2):
-    pass
+
+def create_mixed_dataset(output_shape: tuple=(128,128,128,2)) -> tf.data.Dataset:
+    """
+    Function that creates a dataset made out of original skulls and artificially generated ones. It's main purpose is to train
+    AutoEncoder to capture the common latent space among all the skulls.
+
+    Args:
+        - output_shape: shape of the output data
+
+    Returns:
+        - dataset: shuffled dataset
+    """
+    dcgan_skulls = tf.data.Dataset.list_files("./data/DCGAN3D_data/generated_skulls/*.nrrd", shuffle=False)
+    dcgan_skulls_mapped = dcgan_skulls.map(lambda filename: mixed_data_mapping(filename, output_shape), num_parallel_calls=tf.data.AUTOTUNE)
+    wgangp_skulls = tf.data.Dataset.list_files("./data/WGANGP3D_data/generated_skulls/*.nrrd", shuffle=False)
+    wgangp_skulls_mapped = wgangp_skulls.map(lambda filename: mixed_data_mapping(filename, output_shape), num_parallel_calls=tf.data.AUTOTUNE)
+    vaewgangp_skulls = tf.data.Dataset.list_files("./data/VAE_WGANGP3D_data/generated_skulls/*.nrrd", shuffle=False)
+    vaewgangp_skulls_mapped = vaewgangp_skulls.map(lambda filename: mixed_data_mapping(filename, output_shape), num_parallel_calls=tf.data.AUTOTUNE)
+    vae_skulls = tf.data.Dataset.list_files("./data/VAE3D_data/generated_skulls/*.nrrd", shuffle=False)
+    vae_skulls_mapped = vae_skulls.map(lambda filename: mixed_data_mapping(filename, output_shape), num_parallel_calls=tf.data.AUTOTUNE)
+    introvae_skulls = tf.data.Dataset.list_files("./data/IntroVAE3D_data/generated_skulls/*.nrrd", shuffle=False)
+    introvae_skulls_mapped = introvae_skulls.map(lambda filename: mixed_data_mapping(filename, output_shape), num_parallel_calls=tf.data.AUTOTUNE)
+    real_skulls = create_dataset(dataset_type=0)
+
+    dataset = dcgan_skulls_mapped.concatenate(wgangp_skulls_mapped).concatenate(vaewgangp_skulls_mapped).concatenate(vae_skulls_mapped).concatenate(introvae_skulls_mapped).concatenate(real_skulls)
+
+    return dataset.shuffle(1000)
+
+
+def create_vnet_dataset(output_shape: tuple=(128,128,128,2), model_name: str="WGANGP", data_amount: int=5000) -> tf.data.Dataset:
+    """
+    Function that creates a specific dataset out of synthetically generated skulls, destinated only for a segmentation
+    by V-Net task. Each sample in a dataset is having 'X / data' as a defected skull and a 'mask' as an implant.
+    The structure itself is similar to other dataset creation functions, although there are differences in processing
+    of this dataset in V-Net model training itself.
+    """
+    skulls = tf.data.Dataset.list_files("./data/" + model_name + "3D_data/generated_skulls_" + str(data_amount) + "/*.nrrd", shuffle=False)
+    skulls_mapped = skulls.map(lambda filename: mixed_data_mapping(filename, output_shape), num_parallel_calls=tf.data.AUTOTUNE)
+
+    return skulls_mapped.shuffle(1000)
+
+
+def threshold(image: np.ndarray) -> np.ndarray:
+    """
+    Binary thresholding of the image
+
+    Args:
+        - image: input image (in the grayscale)
+    
+    Returns:
+        - thresholded: thresholded image (values either 0 or 1)
+    """
+    thresholded = np.copy(image)
+    thresholded[image < 0.5] = 0
+    thresholded[image >= 0.5] = 1
+    return thresholded
+
+
+def extract_channels(data_path: pathlib.Path, model_name: str):
+    """
+    Function that extracts/splits the channels of the skulls created by generative AI models and saves to separately.
+    Generally the neural networks used in this project outputs the skulls as a two-channel 3D volumes, where the first channel
+    is a defected skull and the second one is an implant.
+
+    Args:
+        - data_path: general path to the directory where all the data is kept
+        - model_name: name of the model used for generation, available ones: DCGAN, WGANGP, VAE, VAE_WGANGP, IntroVAE
+    """
+    generated_skulls_path = str(data_path) + "/" + model_name + "3D_data/generated_skulls"
+
+    for root, dirs, files in os.walk(generated_skulls_path):
+        for file in files:
+            skull, _, _, _ = load_nrrd(generated_skulls_path + "/" + file)
+            save_to_nrrd(generated_skulls_path + "/defected_skulls/" + file[:-5] + "_defected_skull.nrrd", skull[:,:,:,0], (0.1, 0.1, 0.1))
+            save_to_nrrd(generated_skulls_path + "/implants/" + file[:-5] + "_implant.nrrd", skull[:,:,:,1], (0.1, 0.1, 0.1))
+
+
+if __name__ == "__main__":
+    extract_channels("./data", "DCGAN")
+
+

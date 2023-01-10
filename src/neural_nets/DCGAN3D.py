@@ -3,6 +3,8 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, losses, optimizers, models, metrics
 
+#from utils import threshold
+
 """
 Implementation of the basic DCGAN3D architecture, ref: [https://arxiv.org/pdf/1610.07584.pdf]
 """
@@ -136,12 +138,20 @@ def make_DCGAN3D_generator(latent_dim: int=200, hidden_dim: int=512, output_shap
     # Output layer
     outputs = models.Sequential(
         [
-            layers.Conv3DTranspose(2, (4,4,4), (2,2,2), padding="same", activation="sigmoid")
+            layers.Conv3DTranspose(2, (4,4,4), (2,2,2), padding="same", activation="tanh")
         ], name="Output_layer"
     )(block_4)
 
     generator_model = models.Model(inputs=inputs, outputs=outputs, name="Generator")
     return generator_model
+
+
+def generator_loss(labels, predictions):
+    return tf.reduce_sum(losses.binary_crossentropy(labels, predictions, from_logits=True))
+
+
+def discriminator_loss(labels, predictions):
+    return tf.reduce_sum(losses.binary_crossentropy(labels, predictions, from_logits=True))
 
 
 class DCGAN3D_model(models.Model):
@@ -167,7 +177,7 @@ class DCGAN3D_model(models.Model):
     def train_step(self, real_data):
         # Generate fake data
         batch_size = tf.shape(real_data)[0]
-        noise_input = tf.random.uniform(shape=(batch_size, self.latent_dim))
+        noise_input = tf.random.normal(shape=(batch_size, self.latent_dim))
         fake_data = self.generator(noise_input)
 
         # Assign labels
@@ -182,11 +192,11 @@ class DCGAN3D_model(models.Model):
         with tf.GradientTape() as tape:
             predictions = self.discriminator(data)
             discriminator_loss = self.discriminator_loss_fn(labels, predictions)
-        grads_D = tape.gradient(discriminator_loss, self.discriminator.trainable_weights)
-        self.discriminator_optimizer.apply_gradients(zip(grads_D, self.discriminator.trainable_weights))
+        grads_D = tape.gradient(discriminator_loss, self.discriminator.trainable_variables)
+        self.discriminator_optimizer.apply_gradients(zip(grads_D, self.discriminator.trainable_variables))
 
         # Noise data to generator
-        noise_data = tf.random.uniform(shape=(batch_size, self.latent_dim))
+        noise_data = tf.random.normal(shape=(batch_size, self.latent_dim))
 
         # Misleadning labels
         misleading_labels = tf.zeros(shape=(batch_size, 1))
@@ -195,8 +205,8 @@ class DCGAN3D_model(models.Model):
         with tf.GradientTape() as tape:
             predictions = self.discriminator(self.generator(noise_data))
             generator_loss = self.generator_loss_fn(misleading_labels, predictions)
-        grads_G = tape.gradient(generator_loss, self.generator.trainable_weights)
-        self.generator_optimizer.apply_gradients(zip(grads_G, self.generator.trainable_weights))
+        grads_G = tape.gradient(generator_loss, self.generator.trainable_variables)
+        self.generator_optimizer.apply_gradients(zip(grads_G, self.generator.trainable_variables))
 
         # Monitor loss
         self.generator_loss_metric.update_state(generator_loss)
@@ -226,3 +236,35 @@ class DCGAN3D_monitor(keras.callbacks.Callback):
 
         image = keras.preprocessing.image.array_to_img(result_stacked)
         image.save(self.save_path + "generated_skull_on_epoch_{epoch}.png".format(epoch=epoch))
+
+        # Binary + Implant fitted
+        thresholded_skull = threshold(skull)
+        
+        thresholded_skull_sum = thresholded_skull[0,:,:,:,0] + thresholded_skull[0,:,:,:,1]
+
+        # Visualization purposes tricks
+        thresholded_skull[thresholded_skull == 1] = 5
+        thresholded_skull[thresholded_skull == 2] = 1
+        thresholded_skull[thresholded_skull == 5] = 2
+ 
+        thresholded_skull_sum[thresholded_skull_sum == 1] = 5
+        thresholded_skull_sum[thresholded_skull_sum == 2] = 1
+        thresholded_skull_sum[thresholded_skull_sum == 5] = 2
+
+        result1_thresholded = np.hstack([thresholded_skull[0,:,:,40,0], thresholded_skull[0,:,:,40,1], thresholded_skull_sum[:,:,40]])
+        result2_thresholded = np.hstack([np.rot90(thresholded_skull[0,:,40,:,0]), np.rot90(thresholded_skull[0,:,40,:,1]), np.rot90(thresholded_skull_sum[:,40,:])])
+        result3_thresholded = np.hstack([np.rot90(thresholded_skull[0,40,:,:,0]), np.rot90(thresholded_skull[0,40,:,:,1]), np.rot90(thresholded_skull_sum[40,:,:])])
+        result_thresholded = np.vstack([result1_thresholded, result2_thresholded, result3_thresholded])
+
+        result_thresholded_stacked = np.stack([result_thresholded, result_thresholded, result_thresholded], -1)
+
+        thresholded_channels = keras.preprocessing.image.array_to_img(result_thresholded_stacked)
+        thresholded_channels.save(self.save_path + "generated_skull_thresholded_on_epoch_{epoch}.png".format(epoch=epoch))
+
+
+
+if __name__ == "__main__":
+    disc = make_DCGAN3D_discriminator()
+    keras.utils.plot_model(disc, "discriminator.png", show_shapes=True)
+    gen = make_DCGAN3D_generator()
+    keras.utils.plot_model(gen, "generator.png", show_shapes=True)

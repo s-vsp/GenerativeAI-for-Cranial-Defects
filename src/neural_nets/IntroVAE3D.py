@@ -1,220 +1,154 @@
 import numpy as np
 import tensorflow as tf
+import tensorflow_addons as tfa
 from tensorflow import keras
 from tensorflow.keras import layers, losses, optimizers, models, metrics
 import pickle
+
 
 class Sampler(layers.Layer):
     """
     Input is of shape -> (None, latent_dim), where None represents the future batch size
     """
     def call(self, inputs):
-        Z_mean, Z_log_var = inputs
+        Z_mean, Z_var = inputs
         batch_size = tf.shape(Z_mean)[0]
-        latent_dim = tf.shape(Z_mean)[1]
+        latent_dim = tf.shape( Z_mean)[1]
         
         # Use reparametrization trick
         epsilon = tf.random.normal(shape=(batch_size, latent_dim))
-        Z = Z_mean + tf.exp(Z_log_var / 2) * epsilon
+        Z = Z_mean + tf.exp(Z_var / 2) * epsilon
         return Z
 
 
-class ResidualBlock(models.Model):
-    def __init__(self, filters, kernel_size):
-        super(ResidualBlock, self).__init__()
-
-        self.block = models.Sequential(
-            [
-                layers.Conv3D(filters=filters, kernel_size=kernel_size, padding="same"),
-                layers.BatchNormalization(),
-                layers.LeakyReLU(),
-                layers.Conv3D(filters=filters, kernel_size=kernel_size, padding="same"),
-                layers.BatchNormalization(),
-                layers.LeakyReLU()
-            ]
-        )
-
-        self.x = models.Sequential(
-            [
-                layers.Conv3D(filters=filters, kernel_size=kernel_size, padding="same")
-            ]
-        )
-    
-    def call(self, inputs):
-        out = layers.Add()([self.block(inputs), self.x(inputs)])
-        out = layers.BatchNormalization()(out)
-        out = layers.LeakyReLU()(out)
-        return out
-
-
-def make_IntroVAE3D_inference_model(input_shape: int=128, latent_dim: int=256):
+def make_IntroVAE3D_inference_model(input_shape: int=128, latent_dim : int=200):
     inputs = layers.Input(shape=(input_shape,input_shape,input_shape,2), name="Input_layer")
-
+    
     # Convolutional block 1
     block_1 = models.Sequential(
         [
-            layers.Conv3D(16, (5,5,5), (1,1,1), padding="same"),
-            layers.BatchNormalization(),
-            layers.LeakyReLU(),
-            layers.AveragePooling3D()
+            layers.Conv3D(64, (4,4,4), (2,2,2), padding="same"),
+            tfa.layers.GroupNormalization(groups=64),
+            layers.LeakyReLU(alpha=0.2)
         ], name="Conv3D_block_1"
     )(inputs)
 
-    # Residual Convolutional block 1
-    res_block_1 = models.Sequential(
+    # Convolutional block 2
+    block_2 = models.Sequential(
         [
-            ResidualBlock(32, (1,1,1)),
-            ResidualBlock(32, (3,3,3)),
-            ResidualBlock(32, (3,3,3)),
-            layers.AveragePooling3D()
-        ], name="Residual_Conv3D_block_1"
+            layers.Conv3D(128, (4,4,4), (2,2,2), padding="same"),
+            tfa.layers.GroupNormalization(groups=128),
+            layers.LeakyReLU(alpha=0.2)
+        ], name="Conv3D_block_2"
     )(block_1)
 
-    # Residual Convolutional block 2
-    res_block_2 = models.Sequential(
+    # Convolutional block 3
+    block_3 = models.Sequential(
         [
-            ResidualBlock(64, (1,1,1)),
-            ResidualBlock(64, (3,3,3)),
-            ResidualBlock(64, (3,3,3)),
-            layers.AveragePooling3D()
-        ], name="Residual_Conv3D_block_2"
-    )(res_block_1)
+            layers.Conv3D(256, (4,4,4), (2,2,2), padding="same"),
+            tfa.layers.GroupNormalization(groups=256),
+            layers.LeakyReLU(alpha=0.2)
+        ], name="Conv3D_block_3"
+    )(block_2)
 
-    # Residual Convolutional block 3
-    res_block_3 = models.Sequential(
+    # Convolutional block 4
+    block_4 = models.Sequential(
         [
-            ResidualBlock(128, (1,1,1)),
-            ResidualBlock(128, (3,3,3)),
-            ResidualBlock(128, (3,3,3)),
-            layers.AveragePooling3D()
-        ], name="Residual_Conv3D_block_3"
-    )(res_block_2)
+            layers.Conv3D(512, (4,4,4), (2,2,2), padding="same"),
+            tfa.layers.GroupNormalization(groups=512),
+            layers.LeakyReLU(alpha=0.2)
+        ], name="Conv3D_block_4"
+    )(block_3)
 
-    # Residual Convolutional block 4
-    res_block_4 = models.Sequential(
+    # Adaptive Average Pooling layer
+    adp_avg_pool_1 = models.Sequential(
+    [
+        tfa.layers.AdaptiveAveragePooling3D((1,1,1))
+    ], name="Adaptive_Average_Pooling_1"
+    )(block_4)
+
+    # Flatten layer
+    flatten = models.Sequential(
         [
-            ResidualBlock(256, (3,3,3)),
-            ResidualBlock(256, (3,3,3)),
-            layers.AveragePooling3D()
-        ], name="Residual_Conv3D_block_4"
-    )(res_block_3)
+            layers.Flatten()
+        ], name="Flatten"
+    )(adp_avg_pool_1)
 
-    # Residual Convolutional block 5
-    res_block_5 = models.Sequential(
-        [
-            ResidualBlock(512, (3,3,3)),
-            ResidualBlock(512, (3,3,3)),
-        ], name="Residual_Conv3D_block_5"
-    )(res_block_4)
+    # Compute mean and variance and sample Z
+    Z_mean = layers.Dense(latent_dim, name="Z_mean")(flatten)
+    Z_var = layers.Dense(latent_dim, name="Z_var")(flatten)
+    Z = Sampler()([Z_mean, Z_var])
 
-    # Reshape
-    reshape = models.Sequential(
-        [
-            layers.Reshape(target_shape=(1,1,1,512*4**3,))
-        ]
-    )(res_block_5)
-
-    # Dense layer 1
-    dense_1 = models.Sequential(
-        [
-            layers.Dense(latent_dim*2),
-        ], name="Dense_layer_1"
-    )(reshape)
-
-    # Split tensor - compute mean and variance and sample Z
-    flatten = layers.Flatten()(dense_1)
-    Z_mean, Z_log_var = layers.Lambda(lambda x: tf.split(x, num_or_size_splits=2, axis=-1))(flatten)
-    Z = Sampler()([Z_mean, Z_log_var])
-
-    inference_model = models.Model(inputs=inputs, outputs=[Z_mean, Z_log_var, Z], name="Inference_model")
+    inference_model = models.Model(inputs=inputs, outputs=[Z_mean, Z_var, Z], name="Inference_model")
     return inference_model
 
-def make_IntroVAE3D_generator(latent_dim: int=256):
-    inputs = layers.Input(shape=(latent_dim,), name="Input_layer")
 
-    # Dense layer 1
-    dense_1 = models.Sequential(
+def make_IntroVAE3D_generator(latent_dim: int=200, hidden_dim: int=512, output_shape: int=128):
+    inputs = layers.Input(shape=(latent_dim,), name="Input_layer")
+    
+    # Input dense layer
+    input_dense = models.Sequential(
         [
-            layers.Reshape(target_shape=(1,1,1,latent_dim)),
-            layers.Dense(512*4**3),
-            layers.BatchNormalization(),
-            layers.ReLU()
-        ], name="Dense_layer_1"
+        layers.Dense(int(output_shape / 2**4)**3 * hidden_dim)
+        ], name="Dense_1"
     )(inputs)
 
-    # Residual Convolutional block 1
-    res_block_1 = models.Sequential(
+    # Reshape layer
+    reshape_layer = models.Sequential(
         [
-            layers.Reshape(target_shape=(4,4,4,512)),
-            ResidualBlock(512, (3,3,3)),
-            ResidualBlock(512, (3,3,3))
-        ], name="Residual_Conv3D_block_1"
-    )(dense_1)
+            layers.Reshape((int(output_shape / 2**4), int(output_shape / 2**4), int(output_shape / 2**4), hidden_dim))
+        ], name="Resahpe_layer"
+    )(input_dense)
 
-    # Residual Convolutional block 2
-    res_block_2 = models.Sequential(
+    # Deconvolutional block 1
+    block_1 = models.Sequential(
         [
-            layers.UpSampling3D((2,2,2)),
-            ResidualBlock(256, (1,1,1)),
-            ResidualBlock(256, (3,3,3)),
-            ResidualBlock(256, (3,3,3))
-        ], name="Residual_Conv3D_block_2"
-    )(res_block_1)
+            layers.Conv3DTranspose(512, (4,4,4), (1,1,1), padding="same"),
+            tfa.layers.GroupNormalization(groups=512),
+            layers.ReLU()
+        ], name="DeConv3D_block_1"
+    )(reshape_layer)
 
-    # Residual Convolutional block 3
-    res_block_3 = models.Sequential(
+    # Deconvolutional block 2
+    block_2 = models.Sequential(
         [
-            layers.UpSampling3D((2,2,2)),
-            ResidualBlock(128, (1,1,1)),
-            ResidualBlock(128, (3,3,3)),
-            ResidualBlock(128, (3,3,3))
-        ], name="Residual_Conv3D_block_3"
-    )(res_block_2)
+            layers.Conv3DTranspose(256, (4,4,4), (2,2,2), padding="same"),
+            tfa.layers.GroupNormalization(groups=256),
+            layers.ReLU()
+        ], name="DeConv3D_block_2"
+    )(block_1)
 
-    # Residual Convolutional block 4
-    res_block_4 = models.Sequential(
+    # Deconvolutional block 3
+    block_3 = models.Sequential(
         [
-            layers.UpSampling3D((2,2,2)),
-            ResidualBlock(64, (1,1,1)),
-            ResidualBlock(64, (3,3,3)),
-            ResidualBlock(64, (3,3,3))
-        ], name="Residual_Conv3D_block_4"
-    )(res_block_3)
+            layers.Conv3DTranspose(128, (4,4,4), (2,2,2), padding="same"),
+            tfa.layers.GroupNormalization(groups=128),
+            layers.ReLU()
+        ], name="DeConv3D_block_3"
+    )(block_2)
 
-    # Residual Convolutional block 5
-    res_block_5 = models.Sequential(
+    # Deconvolutional block 4
+    block_4 = models.Sequential(
         [
-            layers.UpSampling3D((2,2,2)),
-            ResidualBlock(32, (1,1,1)),
-            ResidualBlock(32, (3,3,3)),
-            ResidualBlock(32, (3,3,3))
-        ], name="Residual_Conv3D_block_5"
-    )(res_block_4)
-
-    # Residual Convolutional block 6
-    res_block_6 = models.Sequential(
-        [
-            layers.UpSampling3D((2,2,2)),
-            ResidualBlock(16, (1,1,1)),
-            ResidualBlock(16, (3,3,3)),
-            ResidualBlock(16, (3,3,3))
-        ], name="Residual_Conv3D_block_6"
-    )(res_block_5)
+            layers.Conv3DTranspose(64, (4,4,4), (2,2,2), padding="same"),
+            tfa.layers.GroupNormalization(groups=64),
+            layers.ReLU()
+        ], name="DeConv3D_block_4"
+    )(block_3)
 
     # Output layer
     outputs = models.Sequential(
         [
-            layers.Conv3D(3, (5,5,5), (1,1,1), padding="same")
-        ]
-    )(res_block_6)
-    # TODO: Add activation function at the end
+            layers.Conv3DTranspose(2, (4,4,4), (2,2,2), padding="same")
+        ], name="Output_layer"
+    )(block_4)
 
     generator = models.Model(inputs=inputs, outputs=outputs, name="Generator")
     return generator
 
 
 def reconstruction_loss(data, reconstruction):
-    return tf.reduce_mean(losses.mean_squared_error(data, reconstruction))
+    return tf.reduce_mean(tf.reduce_sum(tf.reduce_mean(tf.square(data - reconstruction), axis=0), axis=[1,2,3]))
 
 
 def kl_loss(Z_mean, Z_log_var):
@@ -275,7 +209,7 @@ class IntroVAE3D_model(models.Model):
             reconstruction_loss = self.reconstruction_loss(data, Xr)
             Zr_mean, Zr_log_var, Zr = self.inference_model(tf.stop_gradient(Xr))
             Zpp_mean, Zpp_log_var, Zpp = self.inference_model(tf.stop_gradient(Xp))
-            inference_model_loss = kl_loss + self.alpha * (tf.maximum(0, self.m - self.kl_loss(Zr_mean, Zr_log_var)) + tf.maximum(0, self.m - self.kl_loss(Zpp_mean, Zpp_log_var))) + self.beta * reconstruction_loss
+            inference_model_loss = kl_loss + self.alpha * (tf.maximum(0.0, self.m - self.kl_loss(Zr_mean, Zr_log_var)) + tf.maximum(0.0, self.m - self.kl_loss(Zpp_mean, Zpp_log_var))) + self.beta * reconstruction_loss
         grads_inference_model = tape.gradient(inference_model_loss, self.inference_model.trainable_variables)
         self.inference_model_optimizer.apply_gradients(zip(grads_inference_model, self.inference_model.trainable_variables))
         
@@ -308,8 +242,103 @@ class IntroVAE3D_model(models.Model):
             "generator_total_loss": self.generator_total_loss_metric.result()
         }
 
+
+def threshold(image: np.array):
+    thresholded = np.copy(image)
+    thresholded[image < 0.5] = 0
+    thresholded[image >= 0.5] = 1
+    return thresholded
+
+
+class IntroVAE3D_ReconstructionMonitor(keras.callbacks.Callback):
+    def __init__(self, save_path, data):
+        self.save_path = save_path
+        self.data = data
+
+    def on_epoch_end(self, epoch, logs=None):
+        _, _, Z = self.model.inference_model(self.data)
+        reconstruction = self.model.generator(Z)
+
+        # Show input data (skull)
+        input_skull = self.data.numpy()
+        input_skull_proj_1 = np.hstack([input_skull[0,:,:,40,0], input_skull[0,:,:,40,1]])
+        input_skull_proj_2 = np.hstack([np.rot90(input_skull[0,:,40,:,0]), np.rot90(input_skull[0,:,40,:,1])])
+        input_skull_proj_3 = np.hstack([np.rot90(input_skull[0,40,:,:,0]), np.rot90(input_skull[0,40,:,:,1])])
+        input_skull_result = np.vstack([input_skull_proj_1, input_skull_proj_2, input_skull_proj_3])
+
+        # Show reconstructed raw channels 
+        skull = reconstruction.numpy()
+        result1 = np.hstack([skull[0,:,:,40,0], skull[0,:,:,40,1]])
+        result2 = np.hstack([np.rot90(skull[0,:,40,:,0]), np.rot90(skull[0,:,40,:,1])])
+        result3 = np.hstack([np.rot90(skull[0,40,:,:,0]), np.rot90(skull[0,40,:,:,1])])
+        result = np.vstack([result1, result2, result3])
+
+        # Stack input and reconstruction
+        final_result = np.hstack([input_skull_result, result])
+
+        # For RGB-like purposes of keras arr-to-img visualization
+        result_stacked = np.stack([final_result,final_result,final_result], axis=-1)
+
+        image_channels = keras.preprocessing.image.array_to_img(result_stacked)
+        image_channels.save(self.save_path + "input_skull_and_reconstruction_on_{epoch}.png".format(epoch=epoch))
+
+
+class IntroVAE3D_NewSamplesMonitor(keras.callbacks.Callback):
+    def __init__(self, save_path, latent_dim, batch_size):
+        self.save_path = save_path
+        self.latent_dim = latent_dim
+        self.batch_size = batch_size
+
+    def on_epoch_end(self, epoch, logs=None):
+        Zp = tf.random.normal(shape=(self.batch_size, self.latent_dim))
+        Xp = self.model.generator(Zp)
+
+        # Show generated skull raw channels 
+        skull = Xp.numpy()
+        result1 = np.hstack([skull[0,:,:,40,0], skull[0,:,:,40,1]])
+        result2 = np.hstack([np.rot90(skull[0,:,40,:,0]), np.rot90(skull[0,:,40,:,1])])
+        result3 = np.hstack([np.rot90(skull[0,40,:,:,0]), np.rot90(skull[0,40,:,:,1])])
+        result = np.vstack([result1, result2, result3])
+
+        # For RGB-like purposes of keras arr-to-img visualization
+        result_stacked = np.stack([result,result,result], axis=-1)
+
+        image_channels = keras.preprocessing.image.array_to_img(result_stacked)
+        image_channels.save(self.save_path + "generated_skull_on_epoch_{epoch}.png".format(epoch=epoch))
+
+        # Binary + Implant fitted
+        thresholded_skull = threshold(skull)
+        
+        thresholded_skull_sum = thresholded_skull[0,:,:,:,0] + thresholded_skull[0,:,:,:,1]
+
+        # Visualization purposes tricks
+        thresholded_skull[thresholded_skull == 1] = 5
+        thresholded_skull[thresholded_skull == 2] = 1
+        thresholded_skull[thresholded_skull == 5] = 2
+ 
+        thresholded_skull_sum[thresholded_skull_sum == 1] = 5
+        thresholded_skull_sum[thresholded_skull_sum == 2] = 1
+        thresholded_skull_sum[thresholded_skull_sum == 5] = 2
+
+        result1_thresholded = np.hstack([thresholded_skull[0,:,:,40,0], thresholded_skull[0,:,:,40,1], thresholded_skull_sum[:,:,40]])
+        result2_thresholded = np.hstack([np.rot90(thresholded_skull[0,:,40,:,0]), np.rot90(thresholded_skull[0,:,40,:,1]), np.rot90(thresholded_skull_sum[:,40,:])])
+        result3_thresholded = np.hstack([np.rot90(thresholded_skull[0,40,:,:,0]), np.rot90(thresholded_skull[0,40,:,:,1]), np.rot90(thresholded_skull_sum[40,:,:])])
+        result_thresholded = np.vstack([result1_thresholded, result2_thresholded, result3_thresholded])
+
+        result_thresholded_stacked = np.stack([result_thresholded, result_thresholded, result_thresholded], -1)
+
+        thresholded_channels = keras.preprocessing.image.array_to_img(result_thresholded_stacked)
+        thresholded_channels.save(self.save_path + "generated_skull_thresholded_on_epoch_{epoch}.png".format(epoch=epoch))
+
+
+"""
+Here in generating new samples we generate them from nose (normal dist.) and outputs should be nice.
+In opposite VAE-WGAN had to use reparametrized version of noise to make nice outputs and when it was
+using only normal dist. noise (without reparametrization) outputs where bad (terrible)
+"""
+
 if __name__ == "__main__":
-    A = make_IntroVAE3D_inference_model(128)
-    print(A.summary())
-    B = make_IntroVAE3D_generator()
-    print(B.summary())
+    inferencer = make_IntroVAE3D_inference_model()
+    generator = make_IntroVAE3D_generator()
+    keras.utils.plot_model(inferencer, "INTROVAE_INF.png", show_shapes=True)
+    keras.utils.plot_model(generator, "INTROVAE_GEN.png", show_shapes=True)
